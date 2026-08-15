@@ -17,6 +17,14 @@ import { playClearSound, playGameOverSound, playPlaceSound, startMusic, stopMusi
 
 const BEST_SCORE_KEY = "blockBlastBest";
 const SOUND_KEY = "blockBlastSound";
+const SAVE_KEY = "blockBlastSave";
+
+interface SavedGame {
+  board: Board;
+  piece: Piece;
+  score: number;
+  combo: number;
+}
 
 interface Particle {
   r: number;
@@ -72,15 +80,39 @@ export default function BlockBlastGame() {
   soundOnRef.current = soundOn;
 
   // Piece generation uses Math.random, so the initial piece must be created
-  // client-side only to avoid a server/client hydration mismatch.
+  // client-side only to avoid a server/client hydration mismatch. If a game
+  // was left mid-play (tab/browser closed without reaching game over), resume it.
   useEffect(() => {
-    setPiece(nextPiece(createEmptyBoard()));
+    let restored = false;
+    try {
+      const saved: SavedGame = JSON.parse(localStorage.getItem(SAVE_KEY) ?? "null");
+      if (saved && saved.board && saved.piece) {
+        setBoard(saved.board);
+        setPiece(saved.piece);
+        setScore(saved.score);
+        setCombo(saved.combo);
+        restored = true;
+      }
+    } catch {
+      // ignore malformed save data
+    }
+    if (!restored) {
+      setPiece(nextPiece(createEmptyBoard()));
+    }
     const stored = Number(localStorage.getItem(BEST_SCORE_KEY) ?? 0);
     if (!Number.isNaN(stored)) setBest(stored);
     const storedSound = localStorage.getItem(SOUND_KEY);
     if (storedSound !== null) setSoundOn(storedSound === "1");
     return () => stopMusic();
   }, []);
+
+  // Keep the in-progress game saved so an abrupt close (crash, accidental
+  // tab close, etc.) can be resumed on the next visit.
+  useEffect(() => {
+    if (!piece || gameOver) return;
+    const save: SavedGame = { board, piece, score, combo };
+    localStorage.setItem(SAVE_KEY, JSON.stringify(save));
+  }, [board, piece, score, combo, gameOver]);
 
   function triggerClearFx(particles: Particle[], linesCleared: number) {
     setBurst({ id: Date.now(), particles });
@@ -194,6 +226,7 @@ export default function BlockBlastGame() {
 
     if (isGameOver(nextBoard, upcoming)) {
       setGameOver(true);
+      localStorage.removeItem(SAVE_KEY);
       if (soundOnRef.current) playGameOverSound();
     }
   }
