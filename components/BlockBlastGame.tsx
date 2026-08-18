@@ -52,9 +52,8 @@ interface DropTarget {
 
 function blockStyle(color: string): React.CSSProperties {
   return {
-    background: `linear-gradient(155deg, rgba(255,255,255,0.22) 0%, ${color} 22%, ${color} 100%)`,
-    boxShadow:
-      "inset 0 -3px 0 rgba(0,0,0,0.15), inset 0 2px 0 rgba(255,255,255,0.5), 0 2px 4px rgba(0,0,0,0.25)",
+    background: `linear-gradient(155deg, rgba(255,255,255,0.35) 0%, ${color} 30%, ${color} 100%)`,
+    boxShadow: "inset 0 2px 0 rgba(255,255,255,0.5)",
   };
 }
 
