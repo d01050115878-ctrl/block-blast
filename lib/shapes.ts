@@ -58,6 +58,10 @@ const SEEDS: ShapeSeed[] = [
   { cells: [[0, 1], [0, 2], [1, 1], [2, 0], [2, 1]], weight: 0.8 }, // S-pentomino (mirrored Z)
   { cells: [[0, 1], [1, 0], [1, 1], [2, 1], [3, 1]], weight: 0.5 }, // Y-pentomino
   { cells: [[0, 1], [1, 1], [2, 0], [2, 1], [3, 0]], weight: 0.5 }, // N-pentomino
+  { cells: [[0, 0], [1, 0], [2, 0], [3, 0], [3, 1]], weight: 0.5 }, // L-pentomino
+  { cells: [[0, 0], [0, 1], [1, 0], [1, 1], [2, 0]], weight: 0.6 }, // P-pentomino
+  { cells: [[0, 1], [0, 2], [1, 0], [1, 1], [2, 1]], weight: 0.5 }, // F-pentomino
+  { cells: [[0, 0], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5]], weight: 0.25 }, // I-hexomino, rare
   {
     cells: [
       [0, 0], [0, 1], [0, 2],
