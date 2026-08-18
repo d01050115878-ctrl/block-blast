@@ -89,6 +89,33 @@ export function playClearSound(linesCleared: number, combo: number) {
   }
 }
 
+const PERFECT_CLEAR_NOTES = [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98]; // ascending fanfare
+
+export function playPerfectClearSound() {
+  const ctx = getContext();
+  if (!ctx) return;
+  PERFECT_CLEAR_NOTES.forEach((freq, i) => {
+    playTone(ctx, {
+      frequency: freq,
+      startTime: ctx.currentTime + i * 0.07,
+      duration: 0.22,
+      type: "square",
+      peakGain: 0.11,
+      attack: 0.004,
+      release: 0.18,
+    });
+    playTone(ctx, {
+      frequency: freq * 2,
+      startTime: ctx.currentTime + i * 0.07,
+      duration: 0.18,
+      type: "sine",
+      peakGain: 0.05,
+      attack: 0.004,
+      release: 0.2,
+    });
+  });
+}
+
 export function playGameOverSound() {
   const ctx = getContext();
   if (!ctx) return;

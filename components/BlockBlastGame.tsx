@@ -4,16 +4,28 @@ import { useEffect, useRef, useState } from "react";
 import {
   BOARD_SIZE,
   Board,
+  MonochromeLines,
   Piece,
   canPlacePiece,
   clearLines,
+  computeClearScore,
   createEmptyBoard,
   createTray,
   findFullLines,
+  findMonochromeLines,
+  isBoardEmpty,
   isTrayGameOver,
   placePiece,
 } from "@/lib/gameLogic";
-import { playClearSound, playGameOverSound, playPlaceSound, startMusic, stopMusic } from "@/lib/audio";
+import {
+  playClearSound,
+  playGameOverSound,
+  playPerfectClearSound,
+  playPlaceSound,
+  startMusic,
+  stopMusic,
+} from "@/lib/audio";
+import { COLORS } from "@/lib/shapes";
 
 const BEST_SCORE_KEY = "blockBlastBest";
 const SOUND_KEY = "blockBlastSound";
@@ -24,7 +36,13 @@ interface SavedGame {
   pieces: (Piece | null)[];
   score: number;
   combo: number;
+  comboMissStreak: number;
 }
+
+// Combo grace window: missing a clear doesn't break the combo immediately.
+// The combo only breaks once this many consecutive placements in a row have
+// failed to clear a line (i.e. no clear within 3 turns means it snaps on turn 4).
+const COMBO_GRACE_TURNS = 3;
 
 interface Particle {
   r: number;
@@ -36,6 +54,34 @@ interface Burst {
   id: number;
   particles: Particle[];
 }
+
+type FxTone = "normal" | "combo" | "hot" | "perfect";
+
+interface ScorePopup {
+  id: number;
+  text: string;
+  tone: FxTone;
+}
+
+interface ConfettiPiece {
+  id: number;
+  left: number;
+  delay: number;
+  color: string;
+  rotate: number;
+}
+
+interface Confetti {
+  id: number;
+  pieces: ConfettiPiece[];
+}
+
+interface Shockwave {
+  id: number;
+  color: string;
+}
+
+type ShakeLevel = "normal" | "strong" | null;
 
 interface DragState {
   piece: Piece;
@@ -62,12 +108,55 @@ function trayCellSize(piece: Piece): number {
   return Math.min(28, Math.floor(84 / maxDim));
 }
 
+function lineClearLabel(linesCleared: number): string {
+  switch (linesCleared) {
+    case 1:
+      return "싱글";
+    case 2:
+      return "더블";
+    case 3:
+      return "트리플";
+    case 4:
+      return "쿼드";
+    default:
+      return "메가 클리어";
+  }
+}
+
+function comboBadgeClass(combo: number): string {
+  if (combo >= 7) return "bg-fuchsia-500/25 ring-1 ring-fuchsia-300/70 animate-combo-glow";
+  if (combo >= 4) return "bg-pink-500/20 ring-1 ring-pink-400/60";
+  if (combo >= 2) return "bg-orange-500/20 ring-1 ring-orange-400/60";
+  return "bg-slate-800/70";
+}
+
+function comboTextClass(combo: number): string {
+  if (combo >= 7) return "text-fuchsia-300";
+  if (combo >= 4) return "text-pink-400";
+  if (combo >= 2) return "text-orange-400";
+  return "text-slate-500";
+}
+
+function popupToneClass(tone: FxTone): string {
+  switch (tone) {
+    case "perfect":
+      return "text-4xl text-amber-300 drop-shadow-[0_0_14px_rgba(251,191,36,0.85)]";
+    case "hot":
+      return "text-3xl text-fuchsia-300 drop-shadow-[0_0_10px_rgba(232,121,249,0.7)]";
+    case "combo":
+      return "text-3xl text-orange-300 drop-shadow-[0_0_9px_rgba(251,146,60,0.65)]";
+    default:
+      return "text-2xl text-cyan-300 drop-shadow";
+  }
+}
+
 export default function BlockBlastGame() {
   const [board, setBoard] = useState<Board>(() => createEmptyBoard());
   const [pieces, setPieces] = useState<(Piece | null)[]>([]);
   const [score, setScore] = useState(0);
   const [best, setBest] = useState(0);
   const [combo, setCombo] = useState(0);
+  const [comboMissStreak, setComboMissStreak] = useState(0);
   const [comboPulse, setComboPulse] = useState(0);
   const [gameOver, setGameOver] = useState(false);
   const [drag, setDrag] = useState<DragState | null>(null);
@@ -75,15 +164,40 @@ export default function BlockBlastGame() {
   const [soundOn, setSoundOn] = useState(true);
   const [burst, setBurst] = useState<Burst | null>(null);
   const [flash, setFlash] = useState(false);
-  const [shake, setShake] = useState(false);
+  const [flashTone, setFlashTone] = useState<"white" | "gold" | "color">("white");
+  const [flashColorValue, setFlashColorValue] = useState("#ffffff");
+  const [shakeLevel, setShakeLevel] = useState<ShakeLevel>(null);
+  const [popup, setPopup] = useState<ScorePopup | null>(null);
+  const [confetti, setConfetti] = useState<Confetti | null>(null);
+  const [shockwave, setShockwave] = useState<Shockwave | null>(null);
 
   const boardRef = useRef<HTMLDivElement>(null);
   const messageTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const burstTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flashTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shakeTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const popupTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const confettiTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shockwaveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const soundOnRef = useRef(soundOn);
   soundOnRef.current = soundOn;
+
+  // Mirrors of state read inside window-level pointer listeners and applyPlacement.
+  // Those listeners are registered once per drag and can outlive the render that
+  // created them (e.g. an overlapping second drag from an accidental multi-touch),
+  // so reading state via closure there can be stale. Refs always give the latest value.
+  const boardStateRef = useRef(board);
+  boardStateRef.current = board;
+  const piecesRef = useRef(pieces);
+  piecesRef.current = pieces;
+  const scoreRef = useRef(score);
+  scoreRef.current = score;
+  const comboRef = useRef(combo);
+  comboRef.current = combo;
+  const comboMissStreakRef = useRef(comboMissStreak);
+  comboMissStreakRef.current = comboMissStreak;
+  const bestRef = useRef(best);
+  bestRef.current = best;
 
   // Piece generation uses Math.random, so the initial piece must be created
   // client-side only to avoid a server/client hydration mismatch. If a game
@@ -97,7 +211,15 @@ export default function BlockBlastGame() {
         setPieces(saved.pieces);
         setScore(saved.score);
         setCombo(saved.combo);
+        setComboMissStreak(saved.comboMissStreak ?? 0);
         restored = true;
+        // A save can land mid-corruption (see applyPlacement) or simply be the
+        // last state before the tab closed right as the game ended. Re-validate
+        // instead of trusting the save blindly.
+        if (isTrayGameOver(saved.board, saved.pieces)) {
+          setGameOver(true);
+          localStorage.removeItem(SAVE_KEY);
+        }
       }
     } catch {
       // ignore malformed save data
@@ -116,24 +238,64 @@ export default function BlockBlastGame() {
   // tab close, etc.) can be resumed on the next visit.
   useEffect(() => {
     if (pieces.length === 0 || gameOver) return;
-    const save: SavedGame = { board, pieces, score, combo };
+    const save: SavedGame = { board, pieces, score, combo, comboMissStreak };
     localStorage.setItem(SAVE_KEY, JSON.stringify(save));
-  }, [board, pieces, score, combo, gameOver]);
+  }, [board, pieces, score, combo, comboMissStreak, gameOver]);
 
-  function triggerClearFx(particles: Particle[], linesCleared: number) {
+  function triggerClearFx(particles: Particle[], linesCleared: number, perfectClear: boolean, monochromeColor: string | null) {
     setBurst({ id: Date.now(), particles });
     if (burstTimeout.current) clearTimeout(burstTimeout.current);
-    burstTimeout.current = setTimeout(() => setBurst(null), 650);
+    burstTimeout.current = setTimeout(() => setBurst(null), perfectClear ? 900 : 650);
 
+    if (perfectClear) {
+      setFlashTone("gold");
+    } else if (monochromeColor) {
+      setFlashTone("color");
+      setFlashColorValue(monochromeColor);
+    } else {
+      setFlashTone("white");
+    }
     setFlash(true);
     if (flashTimeout.current) clearTimeout(flashTimeout.current);
-    flashTimeout.current = setTimeout(() => setFlash(false), 450);
+    flashTimeout.current = setTimeout(() => setFlash(false), perfectClear ? 700 : 450);
 
-    if (linesCleared >= 2) {
-      setShake(true);
+    if (perfectClear || linesCleared >= 3) {
+      setShakeLevel("strong");
       if (shakeTimeout.current) clearTimeout(shakeTimeout.current);
-      shakeTimeout.current = setTimeout(() => setShake(false), 350);
+      shakeTimeout.current = setTimeout(() => setShakeLevel(null), 500);
+    } else if (linesCleared >= 2) {
+      setShakeLevel("normal");
+      if (shakeTimeout.current) clearTimeout(shakeTimeout.current);
+      shakeTimeout.current = setTimeout(() => setShakeLevel(null), 350);
     }
+
+    // A ring shockwave on every clear (not just perfect ones) makes even a plain
+    // single-line clear feel punchier, colored to match what triggered it.
+    const waveColor = perfectClear ? "#fbbf24" : monochromeColor ?? "#22d3ee";
+    setShockwave({ id: Date.now(), color: waveColor });
+    if (shockwaveTimeout.current) clearTimeout(shockwaveTimeout.current);
+    shockwaveTimeout.current = setTimeout(() => setShockwave(null), 650);
+
+    if (perfectClear) triggerConfetti();
+  }
+
+  function triggerConfetti() {
+    const confettiPieces: ConfettiPiece[] = Array.from({ length: 40 }).map((_, i) => ({
+      id: i,
+      left: Math.random() * 100,
+      delay: Math.random() * 0.35,
+      color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      rotate: Math.random() * 360,
+    }));
+    setConfetti({ id: Date.now(), pieces: confettiPieces });
+    if (confettiTimeout.current) clearTimeout(confettiTimeout.current);
+    confettiTimeout.current = setTimeout(() => setConfetti(null), 1100);
+  }
+
+  function showScorePopup(amount: number, tone: FxTone) {
+    setPopup({ id: Date.now(), text: `+${amount}`, tone });
+    if (popupTimeout.current) clearTimeout(popupTimeout.current);
+    popupTimeout.current = setTimeout(() => setPopup(null), 1050);
   }
 
   function toggleSound() {
@@ -167,11 +329,22 @@ export default function BlockBlastGame() {
   }
 
   function applyPlacement(placed: Piece, row: number, col: number, index: number) {
+    // Read the latest state via refs, not the render closure: this function can be
+    // invoked from a window pointerup listener that was registered on an earlier
+    // render (e.g. an overlapping second drag), so the closed-over board/pieces/
+    // score/combo/best could otherwise be stale and clobber a newer placement.
+    const board = boardStateRef.current;
+    const pieces = piecesRef.current;
+    const score = scoreRef.current;
+    const combo = comboRef.current;
+    const missStreak = comboMissStreakRef.current;
+    const best = bestRef.current;
     let nextBoard = placePiece(board, placed, row, col);
     const { rows, cols } = findFullLines(nextBoard);
     const linesCleared = rows.length + cols.length;
 
-    let particles: Particle[] = [];
+    const particles: Particle[] = [];
+    let monochrome: MonochromeLines = { count: 0, colors: [] };
     if (linesCleared > 0) {
       const seen = new Set<string>();
       for (const r of rows) {
@@ -192,33 +365,51 @@ export default function BlockBlastGame() {
           }
         }
       }
+      // Must run before clearLines wipes the matched rows/cols to null.
+      monochrome = findMonochromeLines(nextBoard, rows, cols);
       nextBoard = clearLines(nextBoard, rows, cols);
     }
 
+    const perfectClear = linesCleared > 0 && isBoardEmpty(nextBoard);
+
     let nextCombo = combo;
+    let nextMissStreak = missStreak;
     let gained = placed.cells.length;
 
     if (linesCleared > 0) {
       nextCombo = combo + 1;
-      let clearPts = linesCleared * 10;
-      if (linesCleared >= 2) clearPts += 20;
-      if (linesCleared >= 3) clearPts += 30;
-      // Combo bonus grows with streak length, and big streaks get an extra kicker
-      // so chaining clears meaningfully outpaces playing it safe.
-      clearPts += (nextCombo - 1) * 15;
-      if (nextCombo >= 5) clearPts = Math.round(clearPts * 1.5);
-      gained += clearPts;
-      flashMessage(
-        nextCombo > 1
-          ? `${linesCleared}줄 클리어! ${nextCombo}연속 콤보 +${gained}`
-          : `${linesCleared}줄 클리어! +${gained}`
-      );
-      triggerClearFx(particles, linesCleared);
+      nextMissStreak = 0;
+      const scoreResult = computeClearScore(placed.cells.length, linesCleared, nextCombo, perfectClear, monochrome.count);
+      gained = scoreResult.total;
+
+      const label = lineClearLabel(linesCleared);
+      const comboSuffix = nextCombo > 1 ? ` ${nextCombo}연속 콤보` : "";
+      const colorSuffix =
+        monochrome.count > 0 ? ` 🎨 색상매치${monochrome.count > 1 ? ` x${monochrome.count}` : ""}` : "";
+      const message = perfectClear
+        ? `퍼펙트 클리어!${colorSuffix} +${gained}`
+        : `${label}!${comboSuffix}${colorSuffix} +${gained}`;
+      const tone: FxTone = perfectClear ? "perfect" : nextCombo >= 4 ? "hot" : nextCombo >= 2 ? "combo" : "normal";
+
+      flashMessage(message);
+      triggerClearFx(particles, linesCleared, perfectClear, monochrome.colors[0] ?? null);
+      showScorePopup(gained, tone);
       setComboPulse((n) => n + 1);
-      if (soundOnRef.current) playClearSound(linesCleared, nextCombo);
+      if (soundOnRef.current) {
+        playClearSound(linesCleared, nextCombo);
+        if (perfectClear) playPerfectClearSound();
+      }
     } else {
-      if (combo >= 3) flashMessage(`콤보 종료! ${combo}연속까지 이어갔어요`);
-      nextCombo = 0;
+      // Grace window: missing a clear doesn't break the combo right away. The
+      // streak only snaps once COMBO_GRACE_TURNS misses have piled up in a row.
+      if (combo > 0) {
+        nextMissStreak = missStreak + 1;
+        if (nextMissStreak > COMBO_GRACE_TURNS) {
+          flashMessage(`콤보 종료! ${combo}연속까지 이어갔어요`);
+          nextCombo = 0;
+          nextMissStreak = 0;
+        }
+      }
       if (soundOnRef.current) playPlaceSound();
     }
 
@@ -234,6 +425,7 @@ export default function BlockBlastGame() {
     setPieces(updatedPieces);
     setScore(nextScore);
     setCombo(nextCombo);
+    setComboMissStreak(nextMissStreak);
 
     if (nextScore > best) {
       setBest(nextScore);
@@ -249,7 +441,7 @@ export default function BlockBlastGame() {
 
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>, index: number) {
     const activePiece = pieces[index];
-    if (gameOver || !activePiece) return;
+    if (gameOver || !activePiece || drag) return;
     e.preventDefault();
 
     if (soundOnRef.current) startMusic();
@@ -269,7 +461,7 @@ export default function BlockBlastGame() {
       cleanup();
       const target = computeDropTarget(activePiece, ev.clientX, ev.clientY, pointerType);
       setDrag(null);
-      if (target && canPlacePiece(board, activePiece, target.row, target.col)) {
+      if (target && canPlacePiece(boardStateRef.current, activePiece, target.row, target.col)) {
         applyPlacement(activePiece, target.row, target.col, index);
       }
     };
@@ -297,11 +489,15 @@ export default function BlockBlastGame() {
     setPieces(createTray(empty));
     setScore(0);
     setCombo(0);
+    setComboMissStreak(0);
     setGameOver(false);
     setMessage(null);
     setBurst(null);
     setFlash(false);
-    setShake(false);
+    setShakeLevel(null);
+    setPopup(null);
+    setConfetti(null);
+    setShockwave(null);
   }
 
   const previewTarget = drag ? computeDropTarget(drag.piece, drag.x, drag.y, drag.pointerType) : null;
@@ -337,6 +533,9 @@ export default function BlockBlastGame() {
     ghostLeft = drag.x - shapeW / 2;
     ghostTop = drag.y - lift - shapeH / 2;
   }
+
+  const shakeClass =
+    shakeLevel === "strong" ? "animate-boardshake-strong" : shakeLevel === "normal" ? "animate-boardshake" : "";
 
   return (
     <div className="flex min-h-dvh flex-col items-center bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 px-4 py-6 text-slate-100 select-none">
@@ -385,19 +584,11 @@ export default function BlockBlastGame() {
           <div
             key={comboPulse}
             className={`flex-1 rounded-2xl px-4 py-2 text-center shadow-inner transition-colors ${
-              combo >= 2
-                ? "animate-pop bg-orange-500/20 ring-1 ring-orange-400/60"
-                : "bg-slate-800/70"
+              combo >= 2 ? `animate-pop ${comboBadgeClass(combo)}` : "bg-slate-800/70"
             }`}
           >
             <div className="text-xs font-medium uppercase tracking-wider text-slate-400">콤보</div>
-            <div
-              className={`text-2xl font-bold tabular-nums ${
-                combo >= 2 ? "text-orange-400" : "text-slate-500"
-              }`}
-            >
-              {combo}
-            </div>
+            <div className={`text-2xl font-bold tabular-nums ${comboTextClass(combo)}`}>{combo}</div>
           </div>
         </div>
 
@@ -411,7 +602,7 @@ export default function BlockBlastGame() {
 
         <div
           ref={boardRef}
-          className={`relative grid aspect-square w-full touch-none rounded-2xl bg-slate-900 p-1.5 shadow-2xl ring-1 ring-slate-700 ${shake ? "animate-boardshake" : ""}`}
+          className={`relative grid aspect-square w-full touch-none overflow-hidden rounded-2xl bg-slate-900 p-1.5 shadow-2xl ring-1 ring-slate-700 ${shakeClass}`}
           style={{ gridTemplateColumns: `repeat(${BOARD_SIZE}, 1fr)`, gridTemplateRows: `repeat(${BOARD_SIZE}, 1fr)` }}
         >
           {board.map((row, r) =>
@@ -444,7 +635,12 @@ export default function BlockBlastGame() {
           )}
 
           {flash && (
-            <div className="animate-flash pointer-events-none absolute inset-0 rounded-2xl bg-white" />
+            <div
+              className={`pointer-events-none absolute inset-0 rounded-2xl ${
+                flashTone === "gold" ? "animate-flash-gold" : "animate-flash"
+              }`}
+              style={{ background: flashTone === "gold" ? "#fbbf24" : flashTone === "color" ? flashColorValue : "#ffffff" }}
+            />
           )}
 
           {burst && cellSize > 0 && (
@@ -462,6 +658,56 @@ export default function BlockBlastGame() {
                   }}
                 />
               ))}
+              {burst.particles.map((p, idx) => (
+                <div
+                  key={`sparkle-${burst.id}-${idx}`}
+                  className="animate-sparkle absolute rounded-full bg-white"
+                  style={{
+                    left: p.c * cellSize + cellSize / 2 - 3,
+                    top: p.r * cellSize + cellSize / 2 - 3,
+                    width: 6,
+                    height: 6,
+                    animationDelay: `${(idx % 6) * 0.03}s`,
+                    boxShadow: "0 0 6px 2px rgba(255,255,255,0.9)",
+                  }}
+                />
+              ))}
+            </div>
+          )}
+
+          {shockwave && (
+            <div
+              key={`shockwave-${shockwave.id}`}
+              className="pointer-events-none absolute left-1/2 top-1/2 h-16 w-16 rounded-full animate-shockwave"
+              style={{ border: `6px solid ${shockwave.color}`, boxShadow: `0 0 24px 4px ${shockwave.color}` }}
+            />
+          )}
+
+          {confetti && (
+            <div className="pointer-events-none absolute inset-0 overflow-hidden">
+              {confetti.pieces.map((p) => (
+                <div
+                  key={`${confetti.id}-${p.id}`}
+                  className="animate-confetti absolute top-0 h-3 w-3 rounded-sm"
+                  style={{
+                    left: `${p.left}%`,
+                    background: p.color,
+                    animationDelay: `${p.delay}s`,
+                    transform: `rotate(${p.rotate}deg)`,
+                  }}
+                />
+              ))}
+            </div>
+          )}
+
+          {popup && (
+            <div
+              key={`popup-${popup.id}`}
+              className={`animate-score-popup pointer-events-none absolute left-1/2 top-1/3 font-extrabold ${popupToneClass(
+                popup.tone
+              )}`}
+            >
+              {popup.text}
             </div>
           )}
         </div>
