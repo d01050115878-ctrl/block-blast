@@ -8,9 +8,9 @@ import {
   canPlacePiece,
   clearLines,
   createEmptyBoard,
+  createTray,
   findFullLines,
-  isGameOver,
-  nextPiece,
+  isTrayGameOver,
   placePiece,
 } from "@/lib/gameLogic";
 import { playClearSound, playGameOverSound, playPlaceSound, startMusic, stopMusic } from "@/lib/audio";
@@ -21,7 +21,7 @@ const SAVE_KEY = "blockBlastSave";
 
 interface SavedGame {
   board: Board;
-  piece: Piece;
+  pieces: (Piece | null)[];
   score: number;
   combo: number;
 }
@@ -39,6 +39,7 @@ interface Burst {
 
 interface DragState {
   piece: Piece;
+  index: number;
   pointerType: string;
   x: number;
   y: number;
@@ -57,12 +58,18 @@ function blockStyle(color: string): React.CSSProperties {
   };
 }
 
+function trayCellSize(piece: Piece): number {
+  const maxDim = Math.max(piece.rows, piece.cols);
+  return Math.min(28, Math.floor(84 / maxDim));
+}
+
 export default function BlockBlastGame() {
   const [board, setBoard] = useState<Board>(() => createEmptyBoard());
-  const [piece, setPiece] = useState<Piece | null>(null);
+  const [pieces, setPieces] = useState<(Piece | null)[]>([]);
   const [score, setScore] = useState(0);
   const [best, setBest] = useState(0);
   const [combo, setCombo] = useState(0);
+  const [comboPulse, setComboPulse] = useState(0);
   const [gameOver, setGameOver] = useState(false);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -86,9 +93,9 @@ export default function BlockBlastGame() {
     let restored = false;
     try {
       const saved: SavedGame = JSON.parse(localStorage.getItem(SAVE_KEY) ?? "null");
-      if (saved && saved.board && saved.piece) {
+      if (saved && saved.board && saved.pieces && saved.pieces.length > 0) {
         setBoard(saved.board);
-        setPiece(saved.piece);
+        setPieces(saved.pieces);
         setScore(saved.score);
         setCombo(saved.combo);
         restored = true;
@@ -97,7 +104,7 @@ export default function BlockBlastGame() {
       // ignore malformed save data
     }
     if (!restored) {
-      setPiece(nextPiece(createEmptyBoard()));
+      setPieces(createTray(createEmptyBoard()));
     }
     const stored = Number(localStorage.getItem(BEST_SCORE_KEY) ?? 0);
     if (!Number.isNaN(stored)) setBest(stored);
@@ -109,10 +116,10 @@ export default function BlockBlastGame() {
   // Keep the in-progress game saved so an abrupt close (crash, accidental
   // tab close, etc.) can be resumed on the next visit.
   useEffect(() => {
-    if (!piece || gameOver) return;
-    const save: SavedGame = { board, piece, score, combo };
+    if (pieces.length === 0 || gameOver) return;
+    const save: SavedGame = { board, pieces, score, combo };
     localStorage.setItem(SAVE_KEY, JSON.stringify(save));
-  }, [board, piece, score, combo, gameOver]);
+  }, [board, pieces, score, combo, gameOver]);
 
   function triggerClearFx(particles: Particle[], linesCleared: number) {
     setBurst({ id: Date.now(), particles });
@@ -160,7 +167,7 @@ export default function BlockBlastGame() {
     return { row, col };
   }
 
-  function applyPlacement(placed: Piece, row: number, col: number) {
+  function applyPlacement(placed: Piece, row: number, col: number, index: number) {
     let nextBoard = placePiece(board, placed, row, col);
     const { rows, cols } = findFullLines(nextBoard);
     const linesCleared = rows.length + cols.length;
@@ -197,7 +204,10 @@ export default function BlockBlastGame() {
       let clearPts = linesCleared * 10;
       if (linesCleared >= 2) clearPts += 20;
       if (linesCleared >= 3) clearPts += 30;
-      clearPts += (nextCombo - 1) * 10;
+      // Combo bonus grows with streak length, and big streaks get an extra kicker
+      // so chaining clears meaningfully outpaces playing it safe.
+      clearPts += (nextCombo - 1) * 15;
+      if (nextCombo >= 5) clearPts = Math.round(clearPts * 1.5);
       gained += clearPts;
       flashMessage(
         nextCombo > 1
@@ -205,17 +215,24 @@ export default function BlockBlastGame() {
           : `${linesCleared}줄 클리어! +${gained}`
       );
       triggerClearFx(particles, linesCleared);
+      setComboPulse((n) => n + 1);
       if (soundOnRef.current) playClearSound(linesCleared, nextCombo);
     } else {
+      if (combo >= 3) flashMessage(`콤보 종료! ${combo}연속까지 이어갔어요`);
       nextCombo = 0;
       if (soundOnRef.current) playPlaceSound();
     }
 
-    const upcoming = nextPiece(nextBoard);
+    let updatedPieces = pieces.slice();
+    updatedPieces[index] = null;
+    if (updatedPieces.every((p) => p === null)) {
+      updatedPieces = createTray(nextBoard);
+    }
+
     const nextScore = score + gained;
 
     setBoard(nextBoard);
-    setPiece(upcoming);
+    setPieces(updatedPieces);
     setScore(nextScore);
     setCombo(nextCombo);
 
@@ -224,16 +241,16 @@ export default function BlockBlastGame() {
       localStorage.setItem(BEST_SCORE_KEY, String(nextScore));
     }
 
-    if (isGameOver(nextBoard, upcoming)) {
+    if (isTrayGameOver(nextBoard, updatedPieces)) {
       setGameOver(true);
       localStorage.removeItem(SAVE_KEY);
       if (soundOnRef.current) playGameOverSound();
     }
   }
 
-  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
-    if (gameOver || !piece) return;
-    const activePiece = piece;
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>, index: number) {
+    const activePiece = pieces[index];
+    if (gameOver || !activePiece) return;
     e.preventDefault();
 
     if (soundOnRef.current) startMusic();
@@ -241,7 +258,7 @@ export default function BlockBlastGame() {
     const pointerId = e.pointerId;
     const pointerType = e.pointerType;
 
-    setDrag({ piece: activePiece, pointerType, x: e.clientX, y: e.clientY });
+    setDrag({ piece: activePiece, index, pointerType, x: e.clientX, y: e.clientY });
 
     const onMove = (ev: PointerEvent) => {
       if (ev.pointerId !== pointerId) return;
@@ -254,7 +271,7 @@ export default function BlockBlastGame() {
       const target = computeDropTarget(activePiece, ev.clientX, ev.clientY, pointerType);
       setDrag(null);
       if (target && canPlacePiece(board, activePiece, target.row, target.col)) {
-        applyPlacement(activePiece, target.row, target.col);
+        applyPlacement(activePiece, target.row, target.col, index);
       }
     };
 
@@ -278,7 +295,7 @@ export default function BlockBlastGame() {
   function restart() {
     const empty = createEmptyBoard();
     setBoard(empty);
-    setPiece(nextPiece(empty));
+    setPieces(createTray(empty));
     setScore(0);
     setCombo(0);
     setGameOver(false);
@@ -366,6 +383,23 @@ export default function BlockBlastGame() {
             <div className="text-xs font-medium uppercase tracking-wider text-slate-400">최고 기록</div>
             <div className="text-2xl font-bold tabular-nums text-amber-400">{best}</div>
           </div>
+          <div
+            key={comboPulse}
+            className={`flex-1 rounded-2xl px-4 py-2 text-center shadow-inner transition-colors ${
+              combo >= 2
+                ? "animate-pop bg-orange-500/20 ring-1 ring-orange-400/60"
+                : "bg-slate-800/70"
+            }`}
+          >
+            <div className="text-xs font-medium uppercase tracking-wider text-slate-400">콤보</div>
+            <div
+              className={`text-2xl font-bold tabular-nums ${
+                combo >= 2 ? "text-orange-400" : "text-slate-500"
+              }`}
+            >
+              {combo}
+            </div>
+          </div>
         </div>
 
         <div className="relative h-7 w-full text-center">
@@ -433,30 +467,34 @@ export default function BlockBlastGame() {
           )}
         </div>
 
-        <div className="flex w-full min-h-32 items-center justify-center rounded-2xl bg-slate-800/40 p-3">
-          {piece && !drag && (
-            <div
-              onPointerDown={handlePointerDown}
-              className="grid cursor-grab touch-none active:cursor-grabbing"
-              style={{
-                gridTemplateColumns: `repeat(${piece.cols}, 28px)`,
-                gridTemplateRows: `repeat(${piece.rows}, 28px)`,
-              }}
-            >
-              {Array.from({ length: piece.rows * piece.cols }).map((_, idx) => {
-                const r = Math.floor(idx / piece.cols);
-                const c = idx % piece.cols;
-                const active = piece.cells.some(([dr, dc]) => dr === r && dc === c);
-                return (
-                  <div
-                    key={idx}
-                    className={active ? "m-[2px] rounded-[4px]" : ""}
-                    style={active ? blockStyle(piece.color) : undefined}
-                  />
-                );
-              })}
+        <div className="flex w-full min-h-32 items-center justify-around rounded-2xl bg-slate-800/40 p-3">
+          {pieces.map((p, idx) => (
+            <div key={idx} className="flex h-[84px] w-[84px] items-center justify-center">
+              {p && !(drag && drag.index === idx) && (
+                <div
+                  onPointerDown={(e) => handlePointerDown(e, idx)}
+                  className="grid cursor-grab touch-none active:cursor-grabbing"
+                  style={{
+                    gridTemplateColumns: `repeat(${p.cols}, ${trayCellSize(p)}px)`,
+                    gridTemplateRows: `repeat(${p.rows}, ${trayCellSize(p)}px)`,
+                  }}
+                >
+                  {Array.from({ length: p.rows * p.cols }).map((_, i) => {
+                    const r = Math.floor(i / p.cols);
+                    const c = i % p.cols;
+                    const active = p.cells.some(([dr, dc]) => dr === r && dc === c);
+                    return (
+                      <div
+                        key={i}
+                        className={active ? "m-[2px] rounded-[4px]" : ""}
+                        style={active ? blockStyle(p.color) : undefined}
+                      />
+                    );
+                  })}
+                </div>
+              )}
             </div>
-          )}
+          ))}
         </div>
 
         <p className="text-center text-xs text-slate-500">

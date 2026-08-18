@@ -91,6 +91,16 @@ export function nextPiece(board: Board): Piece {
   return candidate;
 }
 
+export const TRAY_SIZE = 3;
+
+export function createTray(board: Board): Piece[] {
+  return Array.from({ length: TRAY_SIZE }, () => nextPiece(board));
+}
+
 export function isGameOver(board: Board, piece: Piece): boolean {
   return !canPlaceAnywhere(board, piece);
+}
+
+export function isTrayGameOver(board: Board, tray: (Piece | null)[]): boolean {
+  return tray.every((p) => p === null || !canPlaceAnywhere(board, p));
 }
